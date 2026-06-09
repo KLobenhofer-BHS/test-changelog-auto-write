@@ -70,61 +70,24 @@ jobs:
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Draft changelog entry with Claude
+      - name: Draft changelog entry (TEST MODE)
         id: claude
         if: |
           steps.check_bot.outputs.is_bot == 'false' &&
           steps.diff.outputs.has_changes == 'true'
         run: |
-          DATE="$(date +'%Y-%m-%d')"
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          CHANGED_FILES=$(cat /tmp/changed_files.txt)
-          DIFF_OUTPUT=$(cat /tmp/diff_output.txt)
+          cat > /tmp/changelog_draft.txt << 'EOF'
+          ## Next Version (2026-06-09)
 
-          PROMPT="You are a changelog writer for a Storybook component library called Digital Hub.
-          Given a Git diff of changed Storybook story files, write a changelog entry
-          that matches the project's existing changelog format exactly.
+          ### Minor Changes
 
-          FORMAT RULES:
-          - Start with: ## Next Version ($DATE)
-          - Use ### for section labels — only include sections that apply:
-              ### Major Changes
-              ### Minor Changes
-              ### Patches
-          - Each bullet starts with a dash (-)
-          - Use backticks for component names: \`Button\`, \`DateTimePicker\`
-          - Use bold (**text**) for important or breaking changes under Major Changes
-          - Each bullet is one clear sentence from a user/designer perspective
-          - Keep it brief: 1-5 bullets per section
-          - Output ONLY the version heading and sections — no preamble
+          - `Button`: TEST — placeholder entry to verify the pipeline works
 
-          CATEGORIZATION:
-          - Major Changes: breaking changes, removed components, renamed APIs
-          - Minor Changes: new components, new props, new variants, visual improvements
-          - Patches: bug fixes, styling corrections, accessibility fixes
+          ### Patches
 
-          Changed files:
-          $CHANGED_FILES
-
-          Git diff:
-          $DIFF_OUTPUT"
-
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "Content-Type: application/json" \
-            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
-            -H "anthropic-version: 2023-06-01" \
-            -d "{
-              \"model\": \"claude-sonnet-4-5\",
-              \"max_tokens\": 800,
-              \"messages\": [{
-                \"role\": \"user\",
-                \"content\": $(echo "$PROMPT" | jq -Rs .)
-              }]
-            }")
-
-          DRAFT=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error generating entry."')
-          echo "$DRAFT" > /tmp/changelog_draft.txt
-          echo "Draft generated."
+          - `Select`: TEST — placeholder patch entry
+          EOF
+          echo "Test mode: skipping Claude API call."
 
       - name: Write changelog entry to CHANGELOG.mdx
         if: |
