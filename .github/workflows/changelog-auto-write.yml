@@ -1,0 +1,178 @@
+name: Storybook Changelog Agent — Auto Write
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - main
+    paths:
+      - 'lib/**/*.stories.tsx'
+      - 'lib/**/*.stories.ts'
+      - 'lib/**/*.stories.jsx'
+      - 'lib/**/*.stories.js'
+
+jobs:
+  draft-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if this commit is from the bot (prevent infinite loop)
+        id: check_bot
+        run: |
+          LAST_COMMIT_AUTHOR=$(git log -1 --pretty=format:'%an')
+          echo "Last commit author: $LAST_COMMIT_AUTHOR"
+          if [ "$LAST_COMMIT_AUTHOR" = "github-actions[bot]" ]; then
+            echo "is_bot=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_bot=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get last Git tag
+        id: last_tag
+        if: steps.check_bot.outputs.is_bot == 'false'
+        run: |
+          LAST_TAG=$(git tag --sort=-version:refname | head -n 1)
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG=$(git rev-list --max-parents=0 HEAD)
+            echo "No previous tag — using first commit"
+          fi
+          echo "last_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Get changed story files and diff
+        id: diff
+        if: steps.check_bot.outputs.is_bot == 'false'
+        run: |
+          LAST="${{ steps.last_tag.outputs.last_tag }}"
+
+          CHANGED_FILES=$(git diff --name-only "$LAST"...HEAD -- \
+            '*.stories.tsx' '*.stories.ts' '*.stories.jsx' '*.stories.js')
+
+          DIFF_OUTPUT=$(git diff "$LAST"...HEAD -- \
+            '*.stories.tsx' '*.stories.ts' '*.stories.jsx' '*.stories.js' \
+            | head -c 12000)
+
+          echo "$CHANGED_FILES" > /tmp/changed_files.txt
+          echo "$DIFF_OUTPUT" > /tmp/diff_output.txt
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Draft changelog entry with Claude
+        id: claude
+        if: |
+          steps.check_bot.outputs.is_bot == 'false' &&
+          steps.diff.outputs.has_changes == 'true'
+        run: |
+          DATE="$(date +'%Y-%m-%d')"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          CHANGED_FILES=$(cat /tmp/changed_files.txt)
+          DIFF_OUTPUT=$(cat /tmp/diff_output.txt)
+
+          PROMPT="You are a changelog writer for a Storybook component library called Digital Hub.
+          Given a Git diff of changed Storybook story files, write a changelog entry
+          that matches the project's existing changelog format exactly.
+
+          FORMAT RULES:
+          - Start with: ## Next Version ($DATE)
+          - Use ### for section labels — only include sections that apply:
+              ### Major Changes
+              ### Minor Changes
+              ### Patches
+          - Each bullet starts with a dash (-)
+          - Use backticks for component names: \`Button\`, \`DateTimePicker\`
+          - Use bold (**text**) for important or breaking changes under Major Changes
+          - Each bullet is one clear sentence from a user/designer perspective
+          - Keep it brief: 1-5 bullets per section
+          - Output ONLY the version heading and sections — no preamble
+
+          CATEGORIZATION:
+          - Major Changes: breaking changes, removed components, renamed APIs
+          - Minor Changes: new components, new props, new variants, visual improvements
+          - Patches: bug fixes, styling corrections, accessibility fixes
+
+          Changed files:
+          $CHANGED_FILES
+
+          Git diff:
+          $DIFF_OUTPUT"
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-sonnet-4-5\",
+              \"max_tokens\": 800,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": $(echo "$PROMPT" | jq -Rs .)
+              }]
+            }")
+
+          DRAFT=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error generating entry."')
+          echo "$DRAFT" > /tmp/changelog_draft.txt
+          echo "Draft generated."
+
+      - name: Write changelog entry to CHANGELOG.mdx
+        if: |
+          steps.check_bot.outputs.is_bot == 'false' &&
+          steps.diff.outputs.has_changes == 'true'
+        run: |
+          python3 - <<EOF
+          import re
+
+          with open("lib/CHANGELOG.mdx", "r", encoding="utf-8") as f:
+              content = f.read()
+
+          with open("/tmp/changelog_draft.txt", "r", encoding="utf-8") as f:
+              draft = f.read().strip()
+
+          # Remove existing Next Version block if present
+          content = re.sub(
+              r'## Next Version[^\n]*\n.*?(?=\n## |\Z)',
+              '',
+              content,
+              flags=re.DOTALL
+          )
+
+          # Insert after description line
+          marker = "All notable changes to this project will be documented in this file."
+          if marker in content:
+              idx = content.index(marker) + len(marker)
+              content = content[:idx] + "\n\n" + draft + "\n" + content[idx:]
+          else:
+              lines = content.split("\n")
+              lines.insert(1, "\n" + draft)
+              content = "\n".join(lines)
+
+          content = re.sub(r'\n{4,}', '\n\n\n', content)
+
+          with open("lib/CHANGELOG.mdx", "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print("Done.")
+          EOF
+
+      - name: Commit changelog to PR branch
+        if: |
+          steps.check_bot.outputs.is_bot == 'false' &&
+          steps.diff.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/CHANGELOG.mdx
+          git diff --staged --quiet || git commit -m "chore: update changelog draft [skip ci]"
+          git push origin ${{ github.head_ref }}
