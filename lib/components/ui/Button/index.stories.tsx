@@ -29,3 +29,10 @@ export const Disabled: Story = {
     children: 'Disabled',
   },
 };
+
+export const Loading: Story = {
+  args: {
+    loading: true,
+    children: 'Loading...',
+  },
+};
